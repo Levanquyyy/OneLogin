@@ -1,0 +1,7 @@
+{
+  "watch": ["src"],
+  "ext": ".ts,.js",
+  "ignore": [],
+  "exec": "npx ts-node --require tsconfig-paths/register ./src/index.ts",
+  "delay": "500"
+}
