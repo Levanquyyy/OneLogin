@@ -1,6 +1,9 @@
 import {FastifyInstance, FastifyPluginOptions} from 'fastify';
 import bcrypt from 'bcrypt';
 import {authMiddleware} from '~/middlewares/authMiddleware';
+import {v4 as uuidv4} from 'uuid';
+import {deleteSessionsByUserId, validateSession} from '~/services/sessionService';
+import {sessionRepository} from "~/repositories/sessionRepository";
 
 const checkPostUserRequest = {
     body: {
@@ -68,6 +71,7 @@ const checkresponse = {
 interface JwtPayload {
     userId: number | string;
     memberNickName: string;
+    jti?: string;
 }
 
 const postUser = async (fastify: FastifyInstance, options: FastifyPluginOptions) => {
@@ -97,6 +101,12 @@ export const getAllUser = async (fastify: FastifyInstance, options: FastifyPlugi
         schema: checkresponse
     }, async (request, reply) => {
         try {
+            const {userId, jti} = (request as any).user;
+
+            const isValid = await validateSession(fastify.db, userId, jti);
+            if (!isValid) {
+                return reply.status(401).send({error: 'Session expired or invalidated'});
+            }
             const dbRequest = fastify.db.request();
             const result = await dbRequest.execute('SelectAllCustomers');
             return reply.send({users: result.recordset});
@@ -105,7 +115,6 @@ export const getAllUser = async (fastify: FastifyInstance, options: FastifyPlugi
         }
     });
 };
-
 
 export const loginUser = async (fastify: FastifyInstance, options: FastifyPluginOptions) => {
     fastify.post('/login', {schema: checkLoginRequest}, async (request, reply) => {
@@ -131,22 +140,20 @@ export const loginUser = async (fastify: FastifyInstance, options: FastifyPlugin
             }
 
             const userId = user.IdUser;
+            const jwtid = uuidv4();
+            const token = fastify.jwt.sign({memberNickName, userId}, {jti: jwtid, expiresIn: '20s'});
 
-            const token = fastify.jwt.sign({ memberNickName, userId });
-            const decoded: any = fastify.jwt.decode(token);
-            console.log("Decoded JWT:", decoded);
-            const iat = decoded.iat;
+            await deleteSessionsByUserId(fastify.db, userId);
 
-
-            const dbRequestSession = fastify.db.request();
-            dbRequestSession.input('TokenKey', iat);
-            dbRequestSession.input('TokenValue', token);
-            await dbRequestSession.query('INSERT INTO Sessions (TokenKey, TokenValue) VALUES (@TokenKey, @TokenValue)');
-
+            const dbRequestInsert = fastify.db.request();
+            dbRequestInsert.input('UserId', userId);
+            dbRequestInsert.input('JwtId', jwtid);
+            dbRequestInsert.input('Token', token);
+            await sessionRepository.insertSession(fastify.db, userId, jwtid, token);
             return reply.send({
                 message: 'Login successful',
                 userId: userId,
-                tokenKey: iat
+                token: token
             });
         } catch (error: any) {
             fastify.log.error(error);
@@ -155,38 +162,36 @@ export const loginUser = async (fastify: FastifyInstance, options: FastifyPlugin
     });
 };
 
+// export const logoutUser = async (fastify: FastifyInstance, options: FastifyPluginOptions) => {
+//     fastify.post('/logout', {
+//         preHandler: authMiddleware
+//     }, async (request, reply) => {
+//         try {
+//             const {userId, jti} = (request as any).user;
+//             const isValid = await validateSession(fastify.db, userId, jti);
+//             if (!isValid) {
+//                 return reply.status(401).send({error: 'Session expired or invalidated'});
+//             }
+//             const dbRequest = fastify.db.request();
+//             dbRequest.input('UserId', userId);
+//             dbRequest.input('JwtId', jti);
+//             const result = await dbRequest.query('DELETE FROM Sessions WHERE UserId = @UserId AND JwtId = @JwtId');
+//
+//             if (result.rowsAffected && result.rowsAffected[0] > 0) {
+//                 return reply.send({message: 'Logged out successfully'});
+//             } else {
+//                 return reply.status(400).send({message: 'Session already inactive or token invalid'});
+//             }
+//         } catch (error: any) {
+//             fastify.log.error(error, "Logout error");
+//             return reply.status(500).send({error: 'Logout failed', details: error.message});
+//         }
+//     });
+// };
 
-export const logoutUser = async (fastify: FastifyInstance, options: FastifyPluginOptions) => {
-    fastify.post('/logout', {
-        preHandler: authMiddleware
-    }, async (request, reply) => {
-        const tokenKey = request.headers.authorization?.split(' ')[1];
-
-        if (!tokenKey) {
-            return reply.status(401).send({error: 'No token provided'});
-        }
-
-        try {
-            await request.jwtVerify<JwtPayload>();
-
-            const dbRequest = fastify.db.request();
-            dbRequest.input('tokenKey', tokenKey);
-            const result = await dbRequest.query('DELETE FROM Sessions WHERE TokenKey = @TokenKey');
-
-            if (result.rowsAffected && result.rowsAffected[0] > 0) {
-                return reply.send({message: 'Logged out successfully'});
-            } else {
-                return reply.status(400).send({message: 'Session already inactive or token invalid'});
-            }
-        } catch (error: any) {
-            fastify.log.error(error, "Logout error");
-            return reply.status(500).send({error: 'Logout failed', details: error.message});
-        }
-    });
-};
 export default async (fastify: FastifyInstance, options: FastifyPluginOptions) => {
     await getAllUser(fastify, options);
     await postUser(fastify, options);
     await loginUser(fastify, options);
-    await logoutUser(fastify, options);
+    // await logoutUser(fastify, options);
 };
