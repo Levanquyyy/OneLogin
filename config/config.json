@@ -1,0 +1,10 @@
+{
+  "development": {
+    "username": "kl1",
+    "password": "kl1",
+    "database": "kl1T",
+    "host": "LAPTOP-37A1JFVI",
+    "port": 1443,
+    "dialect": "mssql"
+  }
+}
