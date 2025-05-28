@@ -40,7 +40,8 @@ const checkLoginRequest = {
             properties: {
                 message: {type: 'string'},
                 userId: {type: 'integer'},
-                token: {type: 'string'}
+                token: {type: 'string'},
+                refreshToken: {type: 'string'}
             }
         }
     }
@@ -102,7 +103,6 @@ export const getAllUser = async (fastify: FastifyInstance, options: FastifyPlugi
     }, async (request, reply) => {
         try {
             const {userId, jti} = (request as any).user;
-
             const isValid = await validateSession(fastify.db, userId, jti);
             if (!isValid) {
                 return reply.status(401).send({error: 'Session expired or invalidated'});
@@ -142,18 +142,20 @@ export const loginUser = async (fastify: FastifyInstance, options: FastifyPlugin
             const userId = user.IdUser;
             const jwtid = uuidv4();
             const token = fastify.jwt.sign({memberNickName, userId}, {jti: jwtid, expiresIn: '20s'});
-
+            const refreshToken = uuidv4();
             await deleteSessionsByUserId(fastify.db, userId);
 
             const dbRequestInsert = fastify.db.request();
             dbRequestInsert.input('UserId', userId);
             dbRequestInsert.input('JwtId', jwtid);
             dbRequestInsert.input('Token', token);
-            await sessionRepository.insertSession(fastify.db, userId, jwtid, token);
+            await sessionRepository.insertSession(fastify.db, userId, jwtid, token, refreshToken);
+
             return reply.send({
                 message: 'Login successful',
                 userId: userId,
-                token: token
+                token: token,
+                refreshToken: refreshToken
             });
         } catch (error: any) {
             fastify.log.error(error);
@@ -161,6 +163,28 @@ export const loginUser = async (fastify: FastifyInstance, options: FastifyPlugin
         }
     });
 };
+export const refreshToken = async (fastify: FastifyInstance, options: FastifyPluginOptions) => {
+    fastify.post('/refresh', async (request, reply) => {
+        const {refreshToken} = request.body as { refreshToken: string };
+        const session = await sessionRepository.findByRefreshToken(fastify.db, refreshToken);
+        if (!session) {
+            return reply.status(401).send({error: 'Invalid refresh token'});
+        }
+        const jwtid = uuidv4();
+        const token = fastify.jwt.sign({memberNickName: session.memberNickName, userId: session.UserId}, {
+            jti: jwtid,
+            expiresIn: '20s'
+        });
+        await sessionRepository.updateSessionJwt(
+            fastify.db,
+            session.UserId,
+            refreshToken,
+            jwtid,
+            token
+        );
+        return reply.send({token});
+    });
+}
 
 // export const logoutUser = async (fastify: FastifyInstance, options: FastifyPluginOptions) => {
 //     fastify.post('/logout', {
@@ -194,4 +218,5 @@ export default async (fastify: FastifyInstance, options: FastifyPluginOptions) =
     await postUser(fastify, options);
     await loginUser(fastify, options);
     // await logoutUser(fastify, options);
+    await refreshToken(fastify, options);
 };
