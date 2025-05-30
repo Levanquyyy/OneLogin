@@ -1,10 +1,10 @@
-import {FastifyInstance, FastifyPluginOptions} from 'fastify';
+import {FastifyInstance, FastifyPluginOptions, FastifyRequest} from 'fastify';
 import bcrypt from 'bcrypt';
 import {authMiddleware} from '~/middlewares/authMiddleware';
 import {v4 as uuidv4} from 'uuid';
 import {deleteSessionsByUserId, validateSession} from '~/services/sessionService';
 import {sessionRepository} from "~/repositories/sessionRepository";
-
+import {fetchGetAllUsers, GetUserByIdTreeSerVices} from '~/services/userServices';
 
 const checkPostUserRequest = {
     body: {
@@ -73,8 +73,8 @@ const checkresponse = {
 };
 
 const postUser = async (fastify: FastifyInstance, options: FastifyPluginOptions) => {
-    fastify.post('/signup', { schema: checkPostUserRequest }, async (request, reply) => {
-        const { memberAccount, memberNickName, parentCode } = request.body as {
+    fastify.post('/signup', {schema: checkPostUserRequest}, async (request, reply) => {
+        const {memberAccount, memberNickName, parentCode} = request.body as {
             memberAccount: string;
             memberNickName: string;
             parentCode?: string;
@@ -91,7 +91,7 @@ const postUser = async (fastify: FastifyInstance, options: FastifyPluginOptions)
             }
 
             const hashedAccount = await bcrypt.hash(memberAccount, 10);
-            const { nanoid } = await import('nanoid');
+            const {nanoid} = await import('nanoid');
 
             const referralCode = nanoid(6);
             console.log(`Generated referral code: ${referralCode}`);
@@ -105,9 +105,9 @@ const postUser = async (fastify: FastifyInstance, options: FastifyPluginOptions)
             const result = await dbRequest.execute('Proc_UsersRegister_Insert');
             const userId = result.returnValue;
 
-            return reply.send({ message: 'User created successfully', userId, referralCode });
+            return reply.send({message: 'User created successfully', userId, referralCode});
         } catch (error: any) {
-            return reply.status(500).send({ error: 'Failed to create user', details: error.message });
+            return reply.status(500).send({error: 'Failed to create user', details: error.message});
         }
     });
 };
@@ -118,15 +118,75 @@ export const getAllUser = async (fastify: FastifyInstance, options: FastifyPlugi
     }, async (request, reply) => {
         try {
             const {userId, jti} = (request as any).user;
+
             const isValid = await validateSession(fastify.db, userId, jti);
             if (!isValid) {
                 return reply.status(401).send({error: 'Session expired or invalidated'});
             }
+
+            const users = await fetchGetAllUsers(fastify.db);
+            return reply.send({users});
+        } catch (error: any) {
+            reply.status(500).send({
+                error: 'Failed to fetch users',
+                details: error.message
+            });
+        }
+    });
+};
+export const GetUserByIdTree = async (fastify: FastifyInstance, options: FastifyPluginOptions) => {
+    fastify.get<{ Params: { id: string } }>('/user/:id', {
+        preHandler: authMiddleware,
+        schema: checkresponse
+    }, async (request, reply) => {
+        try {
+            const {userId, jti} = (request as any).user;
+
+            const isValid = await validateSession(fastify.db, userId, jti);
+            if (!isValid) {
+                return reply.status(401).send({error: 'Session expired or invalidated'});
+            }
+
+            const parentId = parseInt(request.params.id, 10);
+            if (isNaN(parentId)) {
+                return reply.status(400).send({error: 'Invalid parent ID. Must be a number.'});
+            }
+
+            const users = await GetUserByIdTreeSerVices(fastify.db, parentId);
+            return reply.send({users});
+        } catch (error: any) {
+            reply.status(500).send({
+                error: 'Failed to fetch users',
+                details: error.message
+            });
+        }
+    });
+};
+
+export const getAllUserParents = async (fastify: FastifyInstance, options: FastifyPluginOptions) => {
+    fastify.get<{ Params: { id: string } }>('/userparents/:id', {
+        preHandler: authMiddleware,
+        schema: checkresponse
+    }, async (request, reply) => {
+        try {
+            const {userId, jti} = (request as any).user;
+            const isValid = await validateSession(fastify.db, userId, jti);
+            if (!isValid) {
+                return reply.status(401).send({error: 'Session expired or invalidated'});
+            }
+
+            const parentId = parseInt(request.params.id, 10);
+            if (isNaN(parentId)) {
+                return reply.status(400).send({error: 'Invalid parent ID. Must be a number.'});
+            }
+
             const dbRequest = fastify.db.request();
-            const result = await dbRequest.execute('SelectAllCustomers');
+            dbRequest.input('ParentUserId', parentId);
+            const result = await dbRequest.execute('Proc_GetChildUsers');
             return reply.send({users: result.recordset});
         } catch (error: any) {
-            reply.status(500).send({error: 'Failed to fetch users', details: error.message});
+            fastify.log.error(error, 'Error fetching child users');
+            return reply.status(500).send({error: 'Failed to fetch child users', details: error.message});
         }
     });
 };
@@ -155,7 +215,7 @@ export const loginUser = async (fastify: FastifyInstance, options: FastifyPlugin
 
             const userId = user.IdUser;
             const jwtid = uuidv4();
-            const token = fastify.jwt.sign({memberNickName, userId}, {jti: jwtid, expiresIn: '60s'});
+            const token = fastify.jwt.sign({memberNickName, userId}, {jti: jwtid, expiresIn: '1h'});
             const refreshToken = uuidv4();
             await deleteSessionsByUserId(fastify.db, userId);
 
@@ -187,7 +247,7 @@ export const refreshToken = async (fastify: FastifyInstance, options: FastifyPlu
         const jwtid = uuidv4();
         const token = fastify.jwt.sign({memberNickName: session.memberNickName, userId: session.UserId}, {
             jti: jwtid,
-            expiresIn: '20s'
+            expiresIn: '1h'
         });
         await sessionRepository.updateSessionJwt(
             fastify.db,
@@ -233,4 +293,6 @@ export default async (fastify: FastifyInstance, options: FastifyPluginOptions) =
     await loginUser(fastify, options);
     // await logoutUser(fastify, options);
     await refreshToken(fastify, options);
+    await getAllUserParents(fastify, options);
+    await GetUserByIdTree(fastify, options);
 };
